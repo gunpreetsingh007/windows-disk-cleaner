@@ -168,7 +168,24 @@ $tasks = @(
         Name = 'Gradle build cache'
         OptInDev = $true
         Paths = @("$userProfile\.gradle\caches")
-        Action = { Clear-FolderContents @("$userProfile\.gradle\caches") }
+        Action = {
+            $gradleCache = "$userProfile\.gradle\caches"
+            # Gradle's cache is stateful: a PARTIAL delete (e.g. while a daemon or IDE
+            # holds file locks) leaves metadata.bin inconsistent and breaks EVERY build
+            # until the folder is fully wiped. A fully-empty cache is safe; a half-empty
+            # one is corrupt. So refuse to half-clear it, and warn if anything remains.
+            if (Get-Process -Name 'java', 'studio64', 'kotlin-compiler-daemon' -ErrorAction SilentlyContinue) {
+                Write-Warning ('Skipping Gradle cache: a JVM/IDE process is running and could hold locks. ' +
+                    'Close Android Studio and stop Gradle daemons (gradlew --stop), then re-run.')
+                return
+            }
+            Remove-Item $gradleCache -Recurse -Force -ErrorAction SilentlyContinue
+            if (Test-Path $gradleCache) {
+                Write-Warning ("Gradle cache only PARTIALLY cleared (some files were locked). It is now " +
+                    "inconsistent. Close all JVM/IDE processes and delete '$gradleCache' completely, or your " +
+                    "next build will fail with 'Could not read workspace metadata'.")
+            }
+        }
     },
     @{
         Name = 'npm cache'

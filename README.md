@@ -27,6 +27,8 @@ It clears only **regenerable junk**: temp files, crash dumps, leftover driver in
 **Opt-in with `-IncludeDevCaches`:**
 - Gradle, npm, pnpm, Yarn, pip, NuGet caches
 
+> ⚠️ **Close Android Studio and stop Gradle daemons (`gradlew --stop`) before clearing dev caches.** The Gradle cache is stateful — if files are locked by a running daemon/IDE, a partial delete leaves it corrupt (`Could not read workspace metadata from …metadata.bin`) and breaks every build until the whole `~/.gradle/caches` folder is wiped. The script now skips the Gradle cache when a JVM/IDE process is running and warns if it could only clear it partially.
+
 **Opt-in with `-IncludeBrowserCaches`:**
 - Chrome & Edge HTTP caches (not history, passwords, or cookies)
 
