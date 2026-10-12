@@ -12,7 +12,8 @@ It clears only **regenerable junk**: temp files, crash dumps, leftover driver in
 - **Accurate reporting** — measures real space freed per category via drive free-space deltas.
 - **Safe-by-default** — system and developer caches are opt-in.
 - **Admin-aware** — automatically skips system targets (`C:\Windows\Temp`, Windows Update cache) when not elevated, instead of failing.
-- **Single file, no dependencies** — just PowerShell 5.1+ (built into Windows 10/11).
+- **No dependencies** — just PowerShell 5.1+ (built into Windows 10/11).
+- **One-click launcher** — double-click `CleanDisk.bat` for a menu; no commands to remember.
 
 ## What it cleans
 
@@ -35,7 +36,25 @@ It clears only **regenerable junk**: temp files, crash dumps, leftover driver in
 **Opt-in with `-RunDism`:**
 - DISM component-store cleanup (old Windows Update files; admin, slow)
 
-## Usage
+## Quick start: just double-click
+
+Double-click **`CleanDisk.bat`**. It asks for admin rights (so system caches can be cleaned too; say No to run as a standard user), then shows a menu:
+
+```
+   1. Preview       Show what can be freed - deletes nothing
+   2. Quick clean   Temp files, crash dumps, Recycle Bin, ...
+   3. Full clean    Quick + developer and browser caches
+   4. Deep clean    Full + DISM Windows Update cleanup - slow
+
+   S. Create a desktop shortcut to this menu
+   Q. Quit
+```
+
+Every cleaning option still shows the preview and asks `y/N` before deleting anything. Pick **S** once to put a "Clean Disk" shortcut on your desktop. After that you never need to open this folder again.
+
+> Keep `CleanDisk.bat` in the same folder as `Clear-DiskSpace.ps1`. No execution-policy changes are needed, because the launcher runs the script with `-ExecutionPolicy Bypass` for that run only.
+
+## Usage (PowerShell)
 
 Preview only (recommended first run — changes nothing):
 
