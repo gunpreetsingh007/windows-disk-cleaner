@@ -21,17 +21,28 @@ It clears only **regenerable junk**: temp files, crash dumps, leftover driver in
 - User & Windows temp files
 - Crash dumps and Windows Error Reporting queues
 - Explorer thumbnail cache
+- GPU shader caches (NVIDIA, AMD, Intel, DirectX). Games may stutter once while shaders recompile.
+- Old app versions left by Squirrel-installed apps (Discord, Figma, GitHub Desktop, Postman, ...). The newest version, and any version a running process uses, is always kept.
+- PowerToys old update installers
 - Leftover NVIDIA driver installers (`NVIDIA app` OTA artifacts + Downloader cache)
+- Google updater download cache *(admin)*
+- Windows Update setup log (`C:\Windows\Logs\MoSetup\*.log`, can reach 400+ MB) *(admin)*
 - Windows Update download cache *(admin)*
 - Recycle Bin
 
 **Opt-in with `-IncludeDevCaches`:**
-- Gradle, npm, pnpm, Yarn, pip, NuGet caches
+- Gradle, npm, pnpm (store and metadata cache), Yarn, pip, uv, Deno, node-gyp, TypeScript type cache, NuGet
 
 > ⚠️ **Close Android Studio and stop Gradle daemons (`gradlew --stop`) before clearing dev caches.** The Gradle cache is stateful — if files are locked by a running daemon/IDE, a partial delete leaves it corrupt (`Could not read workspace metadata from …metadata.bin`) and breaks every build until the whole `~/.gradle/caches` folder is wiped. The script now skips the Gradle cache when a JVM/IDE process is running and warns if it could only clear it partially.
 
 **Opt-in with `-IncludeBrowserCaches`:**
-- Chrome & Edge HTTP caches (not history, passwords, or cookies)
+- Chrome & Edge HTTP caches, all profiles (not history, passwords, or cookies)
+- Firefox HTTP cache, all profiles
+- Discord and Steam web caches
+
+Firefox, Discord and Steam caches are skipped while that app is running; the preview tells you which apps to close.
+
+**Never touched: Claude and Claude Code.** Any path containing a folder named `claude*`, `.claude*` or `anthropic*` is protected (for example `~\.claude`, `%APPDATA%\Claude`, `%LOCALAPPDATA%\Temp\claude`). This holds even when the folder around it is being emptied, so clearing user temp files does not touch Claude Code's running tasks.
 
 **Opt-in with `-RunDism`:**
 - DISM component-store cleanup (old Windows Update files; admin, slow)
@@ -99,8 +110,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\Clear-DiskSpace.ps1
 | Parameter | Description |
 |---|---|
 | `-Execute` | Actually delete. Without it, the script only previews (dry run). |
-| `-IncludeDevCaches` | Also clear Gradle/npm/pnpm/Yarn/pip/NuGet caches. |
-| `-IncludeBrowserCaches` | Also clear Chrome/Edge HTTP caches. |
+| `-IncludeDevCaches` | Also clear Gradle/npm/pnpm/Yarn/pip/uv/Deno/node-gyp/TypeScript/NuGet caches. |
+| `-IncludeBrowserCaches` | Also clear Chrome/Edge/Firefox HTTP caches and Discord/Steam web caches. |
 | `-RunDism` | Also run DISM component-store cleanup (admin, 10–30 min). |
 | `-Yes` | Skip the confirmation prompt. |
 

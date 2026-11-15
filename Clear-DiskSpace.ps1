@@ -5,9 +5,13 @@
 
 .DESCRIPTION
     Clear-DiskSpace scans well-known space hogs (temp files, crash dumps, leftover
-    driver installers, package-manager and build caches, browser caches, Windows
-    Update leftovers) and removes only data that the system or your tools recreate
-    on demand. Nothing in your documents, projects, or installed programs is touched.
+    driver installers, GPU shader caches, old app versions, package-manager and build
+    caches, browser caches, Windows Update leftovers) and removes only data that the
+    system or your tools recreate on demand. Nothing in your documents, projects, or
+    installed programs is touched.
+
+    Claude / Claude Code data is never touched: any path with a folder named
+    claude*, .claude* or anthropic* is protected, even inside a folder being cleared.
 
     By default it runs in DRY-RUN mode and only reports what *would* be freed.
     Re-run with -Execute to actually delete.
@@ -16,12 +20,14 @@
     Actually delete. Without this switch the script only previews (dry run).
 
 .PARAMETER IncludeDevCaches
-    Also clear developer build/package caches (Gradle, npm, pnpm, yarn, pip, NuGet).
-    These are safe but will make your next build/install slower while they rebuild.
+    Also clear developer build/package caches (Gradle, npm, pnpm, Yarn, pip, uv, Deno,
+    NuGet, node-gyp, TypeScript). These are safe but will make your next build/install
+    slower while they rebuild.
 
 .PARAMETER IncludeBrowserCaches
-    Also clear Chrome/Edge HTTP caches (not history, passwords, or cookies).
-    Close the browser first for best results.
+    Also clear browser and app web caches: Chrome, Edge (all profiles), Firefox (all
+    profiles), Discord, Steam. Not history, passwords, or cookies. Close those apps
+    first; a cache whose app is running is skipped.
 
 .PARAMETER RunDism
     Also run DISM component-store cleanup (/StartComponentCleanup). Requires admin
@@ -58,6 +64,10 @@ param(
 $ErrorActionPreference = 'SilentlyContinue'
 $script:Drive = 'C'
 
+$userLocal = $env:LOCALAPPDATA
+$userRoaming = $env:APPDATA
+$userProfile = $env:USERPROFILE
+
 function Test-Admin {
     $id = [Security.Principal.WindowsIdentity]::GetCurrent()
     (New-Object Security.Principal.WindowsPrincipal($id)).IsInRole(
@@ -68,13 +78,57 @@ function Get-FreeBytes { (Get-PSDrive $script:Drive).Free }
 
 function Format-GB { param([double]$Bytes) '{0,8:N2} GB' -f ($Bytes / 1GB) }
 
-# Fast-ish recursive size of a path; tolerant of locked/inaccessible files.
+# ---------------------------------------------------------------------------
+# Protection: Claude desktop and Claude Code keep their sessions, settings, VM and
+# running binaries in folders named claude*/.claude*/anthropic* (for example
+# %LOCALAPPDATA%\Temp\claude holds the output of tasks that are running right now).
+# Nothing at or below such a folder is deleted, and neither is any folder that
+# contains one, no matter which task asks.
+# ---------------------------------------------------------------------------
+$script:ProtectedName = '^\.?(claude|anthropic)'
+$script:ProtectedRoots = @(
+    foreach ($dir in $userProfile, $userRoaming, $userLocal, "$userLocal\Temp",
+                     "$userLocal\Programs", "$userLocal\Packages") {
+        Get-ChildItem -LiteralPath $dir -Force -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match $script:ProtectedName } |
+            ForEach-Object { $_.FullName.TrimEnd('\') }
+    }
+)
+
+# True if deleting $Path would touch protected data. With -ContentsOnly the folder
+# itself is kept (only its children are deleted, and each child is checked on its
+# own), so it only counts as protected if it is *inside* a protected folder - e.g.
+# %LOCALAPPDATA%\Temp may be emptied, but its 'claude' child is skipped.
+function Test-Protected {
+    param([string]$Path, [switch]$ContentsOnly)
+    $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+    if ($full.Split('\') | Where-Object { $_ -match $script:ProtectedName }) { return $true }
+    if ($ContentsOnly) { return $false }
+    foreach ($root in $script:ProtectedRoots) {
+        # $full is the protected item itself or an ancestor of it.
+        if ($root -ieq $full -or $root.StartsWith($full + '\', [StringComparison]::OrdinalIgnoreCase)) {
+            return $true
+        }
+    }
+    $false
+}
+
+# Expand wildcard patterns to the files/folders that actually exist.
+function Resolve-Existing {
+    param([string[]]$Patterns)
+    foreach ($p in $Patterns) {
+        Get-Item -Path $p -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
+    }
+}
+
+# Fast-ish recursive size of files/folders; tolerant of locked/inaccessible files.
 function Get-PathSize {
     param([string[]]$Paths)
     $total = 0L
     foreach ($p in $Paths) {
-        if (Test-Path $p) {
-            $total += (Get-ChildItem $p -Recurse -Force -File -ErrorAction SilentlyContinue |
+        if ($p -and (Test-Path -LiteralPath $p) -and -not (Test-Protected $p -ContentsOnly)) {
+            $total += (Get-ChildItem -LiteralPath $p -Recurse -Force -File -ErrorAction SilentlyContinue |
+                Where-Object { -not (Test-Protected $_.FullName -ContentsOnly) } |
                 Measure-Object -Property Length -Sum).Sum
         }
     }
@@ -85,59 +139,138 @@ function Get-PathSize {
 function Clear-FolderContents {
     param([string[]]$Paths)
     foreach ($p in $Paths) {
-        if (Test-Path $p) {
-            Get-ChildItem $p -Force -ErrorAction SilentlyContinue |
-                Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+        if (-not $p -or -not (Test-Path -LiteralPath $p) -or (Test-Protected $p -ContentsOnly)) { continue }
+        Get-ChildItem -LiteralPath $p -Force -ErrorAction SilentlyContinue |
+            Where-Object { -not (Test-Protected $_.FullName) } |
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# Delete the files/folders themselves.
+function Remove-Targets {
+    param([string[]]$Paths)
+    foreach ($p in $Paths) {
+        if ($p -and (Test-Path -LiteralPath $p) -and -not (Test-Protected $p)) {
+            Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
 }
 
-$isAdmin = Test-Admin
-$userLocal = $env:LOCALAPPDATA
-$userRoaming = $env:APPDATA
-$userProfile = $env:USERPROFILE
+# Chromium-based apps (Chrome, Edge, Steam's web view) keep one HTTP/code/GPU cache per
+# profile. Only these cache folders are returned - never Cookies, Local Storage, etc.
+function Get-ChromiumCacheDirs {
+    param([string]$UserData)
+    $cacheNames = 'Cache', 'Code Cache', 'GPUCache', 'DawnGraphiteCache', 'DawnWebGPUCache'
+    Get-ChildItem -LiteralPath $UserData -Directory -Force -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -eq 'Default' -or $_.Name -match '^Profile \d+$' } |
+        ForEach-Object {
+            foreach ($c in $cacheNames) {
+                $d = Join-Path $_.FullName $c
+                if (Test-Path -LiteralPath $d) { $d }
+            }
+        }
+}
 
-# Each task: a friendly name, the paths it targets, whether it needs admin / opt-in,
-# and the action that performs the cleanup. Size is estimated from the same paths
-# unless a task provides its own estimator.
+# Apps installed by Squirrel (Discord, Figma, GitHub Desktop, Postman, ...) keep the
+# previous app-x.y.z folder after each update. Returns the folders that are safe to
+# remove: every version except the newest, and never one a running process uses.
+# An app with any oddly-named app-* folder is skipped entirely rather than guessed at.
+function Get-StaleAppVersions {
+    $runningPaths = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path } |
+        ForEach-Object { $_.Path })
+    Get-ChildItem -LiteralPath $userLocal -Directory -Force -ErrorAction SilentlyContinue |
+        Where-Object { (Test-Path -LiteralPath (Join-Path $_.FullName 'Update.exe')) -and
+                       -not (Test-Protected $_.FullName) } |
+        ForEach-Object {
+            $versions = @(Get-ChildItem -LiteralPath $_.FullName -Directory -Filter 'app-*' -ErrorAction SilentlyContinue)
+            if ($versions.Count -lt 2) { return }
+            if ($versions | Where-Object { $_.Name -notmatch '^app-\d+(\.\d+){1,3}$' }) { return }
+            $versions | Sort-Object { [version]$_.Name.Substring(4) } -Descending |
+                Select-Object -Skip 1 |
+                Where-Object {
+                    $prefix = $_.FullName + '\'
+                    -not ($runningPaths | Where-Object { $_.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) })
+                } |
+                ForEach-Object { $_.FullName }
+        }
+}
+
+# Names of any listed processes that are running right now.
+function Get-RunningBlockers {
+    param([string[]]$Names)
+    if (-not $Names) { return @() }
+    @(Get-Process -Name $Names -ErrorAction SilentlyContinue | ForEach-Object { $_.ProcessName } |
+        Sort-Object -Unique)
+}
+
+$isAdmin = Test-Admin
+
+# Each task: a friendly name and the paths it targets, plus optional flags:
+#   RequiresAdmin / OptInDev / OptInBrowser  - when the task runs
+#   RemoveSelf    - delete the paths themselves (default: delete their contents)
+#   SkipIfRunning - process names; the task is skipped while any of them runs
+#   Action        - custom cleanup instead of the default delete
+#   SizeOverride  - custom size estimate instead of measuring Paths
 $tasks = @(
     @{
         Name = 'User temp files'
         Paths = @("$userLocal\Temp")
-        Action = { Clear-FolderContents @("$userLocal\Temp") }
     },
     @{
         Name = 'Windows temp files'
         Paths = @('C:\Windows\Temp')
         RequiresAdmin = $true
-        Action = { Clear-FolderContents @('C:\Windows\Temp') }
     },
     @{
         Name = 'Crash dumps'
         Paths = @("$userLocal\CrashDumps")
-        Action = { Clear-FolderContents @("$userLocal\CrashDumps") }
     },
     @{
         Name = 'Windows Error Reporting'
         Paths = @("$env:ProgramData\Microsoft\Windows\WER\ReportQueue",
                   "$env:ProgramData\Microsoft\Windows\WER\ReportArchive")
-        Action = { Clear-FolderContents @("$env:ProgramData\Microsoft\Windows\WER\ReportQueue",
-                                          "$env:ProgramData\Microsoft\Windows\WER\ReportArchive") }
     },
     @{
         Name = 'Explorer thumbnail cache'
-        Paths = @("$userLocal\Microsoft\Windows\Explorer")
-        Action = {
-            Get-ChildItem "$userLocal\Microsoft\Windows\Explorer\thumbcache_*.db" -Force `
-                -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
-        }
+        Paths = @(Resolve-Existing "$userLocal\Microsoft\Windows\Explorer\thumbcache_*.db")
+        RemoveSelf = $true
+    },
+    @{
+        # DirectX/OpenGL shader caches. Rebuilt automatically; the first launch of a
+        # game afterwards may stutter briefly while shaders recompile.
+        Name = 'GPU shader caches'
+        Paths = @("$userLocal\NVIDIA\DXCache", "$userLocal\NVIDIA\GLCache", "$userLocal\D3DSCache",
+                  "$userLocal\AMD\DxCache", "$userLocal\AMD\GLCache", "$userLocal\Intel\ShaderCache")
+    },
+    @{
+        Name = 'Old app versions (Discord, Figma, ...)'
+        Paths = @(Get-StaleAppVersions)
+        RemoveSelf = $true
+    },
+    @{
+        Name = 'PowerToys old installers'
+        Paths = @("$userLocal\Microsoft\PowerToys\Updates")
     },
     @{
         Name = 'NVIDIA leftover driver installers'
         Paths = @("$env:ProgramData\NVIDIA Corporation\NVIDIA app\UpdateFramework\ota-artifacts",
                   "$env:ProgramData\NVIDIA Corporation\Downloader")
-        Action = { Clear-FolderContents @("$env:ProgramData\NVIDIA Corporation\NVIDIA app\UpdateFramework\ota-artifacts",
-                                          "$env:ProgramData\NVIDIA Corporation\Downloader") }
+    },
+    @{
+        # Downloaded component packages Google's updater keeps after installing them.
+        Name = 'Google updater download cache'
+        Paths = @("${env:ProgramFiles(x86)}\Google\GoogleUpdater\crx_cache",
+                  "$env:ProgramFiles\Google\GoogleUpdater\crx_cache")
+        RequiresAdmin = $true
+    },
+    @{
+        # Log of the last Windows Update install; can grow to hundreds of MB. Skipped
+        # while an update is being installed.
+        Name = 'Windows Update setup logs'
+        Paths = @(Resolve-Existing 'C:\Windows\Logs\MoSetup\*.log')
+        RemoveSelf = $true
+        RequiresAdmin = $true
+        SkipIfRunning = @('TiWorker', 'SetupHost')
     },
     @{
         Name = 'Windows Update download cache'
@@ -190,54 +323,82 @@ $tasks = @(
     @{
         Name = 'npm cache'
         OptInDev = $true
-        Paths = @("$userLocal\npm-cache", "$userProfile\npm-cache", "$userProfile\.npm")
-        Action = { Clear-FolderContents @("$userLocal\npm-cache", "$userProfile\npm-cache", "$userProfile\.npm") }
+        Paths = @("$userLocal\npm-cache", "$userRoaming\npm-cache", "$userProfile\npm-cache", "$userProfile\.npm")
     },
     @{
-        Name = 'pnpm store'
+        # pnpm keeps its content store and its metadata cache in separate folders.
+        Name = 'pnpm store and cache'
         OptInDev = $true
-        Paths = @("$userLocal\pnpm\store", "$userProfile\.pnpm-store")
-        Action = { Clear-FolderContents @("$userLocal\pnpm\store", "$userProfile\.pnpm-store") }
+        Paths = @("$userLocal\pnpm\store", "$userProfile\.pnpm-store", "$userLocal\pnpm-cache")
     },
     @{
         Name = 'Yarn cache'
         OptInDev = $true
         Paths = @("$userLocal\Yarn\Cache")
-        Action = { Clear-FolderContents @("$userLocal\Yarn\Cache") }
     },
     @{
         Name = 'pip cache'
         OptInDev = $true
         Paths = @("$userLocal\pip\Cache")
-        Action = { Clear-FolderContents @("$userLocal\pip\Cache") }
+    },
+    @{
+        Name = 'uv (Python) cache'
+        OptInDev = $true
+        Paths = @("$userLocal\uv\cache")
+    },
+    @{
+        # Deno's downloaded npm packages and remote modules (what `deno clean` removes).
+        Name = 'Deno cache'
+        OptInDev = $true
+        Paths = @("$userLocal\deno\npm", "$userLocal\deno\remote", "$userLocal\deno\gen")
+    },
+    @{
+        Name = 'node-gyp headers cache'
+        OptInDev = $true
+        Paths = @("$userLocal\node-gyp\Cache")
+    },
+    @{
+        # @types packages the TypeScript language server downloads for JS projects.
+        Name = 'TypeScript type cache'
+        OptInDev = $true
+        Paths = @("$userLocal\Microsoft\TypeScript")
     },
     @{
         Name = 'NuGet cache'
         OptInDev = $true
         Paths = @("$userProfile\.nuget\packages")
-        Action = { Clear-FolderContents @("$userProfile\.nuget\packages") }
     },
 
-    # ---- Browser caches (opt-in: -IncludeBrowserCaches) ----
+    # ---- Browser and app web caches (opt-in: -IncludeBrowserCaches) ----
     @{
-        Name = 'Chrome cache'
+        Name = 'Chrome cache (all profiles)'
         OptInBrowser = $true
-        Paths = @("$userLocal\Google\Chrome\User Data\Default\Cache",
-                  "$userLocal\Google\Chrome\User Data\Default\Code Cache",
-                  "$userLocal\Google\Chrome\User Data\Default\GPUCache")
-        Action = { Clear-FolderContents @("$userLocal\Google\Chrome\User Data\Default\Cache",
-                                          "$userLocal\Google\Chrome\User Data\Default\Code Cache",
-                                          "$userLocal\Google\Chrome\User Data\Default\GPUCache") }
+        Paths = @(Get-ChromiumCacheDirs "$userLocal\Google\Chrome\User Data")
     },
     @{
-        Name = 'Edge cache'
+        Name = 'Edge cache (all profiles)'
         OptInBrowser = $true
-        Paths = @("$userLocal\Microsoft\Edge\User Data\Default\Cache",
-                  "$userLocal\Microsoft\Edge\User Data\Default\Code Cache",
-                  "$userLocal\Microsoft\Edge\User Data\Default\GPUCache")
-        Action = { Clear-FolderContents @("$userLocal\Microsoft\Edge\User Data\Default\Cache",
-                                          "$userLocal\Microsoft\Edge\User Data\Default\Code Cache",
-                                          "$userLocal\Microsoft\Edge\User Data\Default\GPUCache") }
+        Paths = @(Get-ChromiumCacheDirs "$userLocal\Microsoft\Edge\User Data")
+    },
+    @{
+        # Firefox keeps its HTTP cache under Local, separate from the profile data
+        # (bookmarks, logins, history) under Roaming, which is not touched.
+        Name = 'Firefox cache (all profiles)'
+        OptInBrowser = $true
+        Paths = @(Resolve-Existing "$userLocal\Mozilla\Firefox\Profiles\*\cache2")
+        SkipIfRunning = @('firefox')
+    },
+    @{
+        Name = 'Discord cache'
+        OptInBrowser = $true
+        Paths = @("$userRoaming\discord\Cache", "$userRoaming\discord\Code Cache", "$userRoaming\discord\GPUCache")
+        SkipIfRunning = @('Discord')
+    },
+    @{
+        Name = 'Steam web cache'
+        OptInBrowser = $true
+        Paths = @(Get-ChromiumCacheDirs "$userLocal\Steam\htmlcache")
+        SkipIfRunning = @('steam', 'steamwebhelper')
     }
 )
 
@@ -257,7 +418,7 @@ Write-Host ("  C: free now : {0}" -f (Format-GB (Get-FreeBytes)))
 Write-Host ''
 
 # ---------------------------------------------------------------------------
-# Build the active task list and estimate sizes
+# Build the active task list and estimate sizes. Empty targets are left out.
 # ---------------------------------------------------------------------------
 $active = foreach ($t in $tasks) {
     if ($t.RequiresAdmin -and -not $isAdmin) { continue }
@@ -265,7 +426,11 @@ $active = foreach ($t in $tasks) {
     if ($t.OptInBrowser -and -not $IncludeBrowserCaches) { continue }
 
     $size = if ($t.SizeOverride) { [long](& $t.SizeOverride) } else { Get-PathSize $t.Paths }
-    [PSCustomObject]@{ Name = $t.Name; EstBytes = $size; Action = $t.Action }
+    if ($size -le 0) { continue }
+    [PSCustomObject]@{
+        Name = $t.Name; EstBytes = $size; Paths = $t.Paths; Action = $t.Action
+        RemoveSelf = [bool]$t.RemoveSelf; SkipIfRunning = $t.SkipIfRunning
+    }
 }
 
 if (-not $active) {
@@ -275,11 +440,13 @@ if (-not $active) {
 
 Write-Host 'Targets:' -ForegroundColor Cyan
 $active | Sort-Object EstBytes -Descending | ForEach-Object {
-    Write-Host ('  {0,-34} {1}' -f $_.Name, (Format-GB $_.EstBytes))
+    $blockers = Get-RunningBlockers $_.SkipIfRunning
+    $note = if ($blockers) { "  (close $($blockers -join ', ') first, or it is skipped)" } else { '' }
+    Write-Host ('  {0,-40} {1}{2}' -f $_.Name, (Format-GB $_.EstBytes), $note)
 }
 $estTotal = ($active | Measure-Object EstBytes -Sum).Sum
-Write-Host ('  {0,-34} {1}' -f '----------------------------------', '----------')
-Write-Host ('  {0,-34} {1}' -f 'Estimated reclaimable', (Format-GB $estTotal)) -ForegroundColor Green
+Write-Host ('  {0,-40} {1}' -f '----------------------------------------', '----------')
+Write-Host ('  {0,-40} {1}' -f 'Estimated reclaimable', (Format-GB $estTotal)) -ForegroundColor Green
 Write-Host ''
 
 # ---------------------------------------------------------------------------
@@ -302,9 +469,18 @@ if (-not $Yes) {
 Write-Host ''
 $startFree = Get-FreeBytes
 $results = foreach ($t in $active) {
+    # Checked again here: the app may have been opened or closed since the preview.
+    $blockers = Get-RunningBlockers $t.SkipIfRunning
+    if ($blockers) {
+        Write-Host ('Skipping {0}: {1} is running. Close it and re-run.' -f $t.Name, ($blockers -join ', ')) -ForegroundColor Yellow
+        [PSCustomObject]@{ Name = "$($t.Name) (skipped)"; Freed = 0 }
+        continue
+    }
     $before = Get-FreeBytes
     Write-Host ('Cleaning {0} ...' -f $t.Name) -NoNewline
-    & $t.Action
+    if ($t.Action) { & $t.Action }
+    elseif ($t.RemoveSelf) { Remove-Targets $t.Paths }
+    else { Clear-FolderContents $t.Paths }
     $freed = (Get-FreeBytes) - $before
     if ($freed -lt 0) { $freed = 0 }
     Write-Host (' done ({0})' -f (Format-GB $freed)) -ForegroundColor Green
@@ -329,11 +505,11 @@ Write-Host '============================================================' -Foreg
 Write-Host '   Summary' -ForegroundColor Cyan
 Write-Host '============================================================' -ForegroundColor Cyan
 $results | Sort-Object Freed -Descending | ForEach-Object {
-    Write-Host ('  {0,-34} {1}' -f $_.Name, (Format-GB $_.Freed))
+    Write-Host ('  {0,-40} {1}' -f $_.Name, (Format-GB $_.Freed))
 }
-Write-Host ('  {0,-34} {1}' -f '----------------------------------', '----------')
-Write-Host ('  {0,-34} {1}' -f 'TOTAL FREED', (Format-GB $totalFreed)) -ForegroundColor Green
-Write-Host ('  {0,-34} {1}' -f 'C: free now', (Format-GB (Get-FreeBytes))) -ForegroundColor Green
+Write-Host ('  {0,-40} {1}' -f '----------------------------------------', '----------')
+Write-Host ('  {0,-40} {1}' -f 'TOTAL FREED', (Format-GB $totalFreed)) -ForegroundColor Green
+Write-Host ('  {0,-40} {1}' -f 'C: free now', (Format-GB (Get-FreeBytes))) -ForegroundColor Green
 Write-Host ''
 Write-Host 'Tip: for old Windows Update files in C:\Windows, also run as admin:' -ForegroundColor DarkGray
 Write-Host '     Dism /Online /Cleanup-Image /StartComponentCleanup /ResetBase' -ForegroundColor DarkGray

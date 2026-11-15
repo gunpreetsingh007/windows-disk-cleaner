@@ -67,7 +67,7 @@ exit /b 0
 echo.
 echo  Before continuing, please:
 echo    - Close Android Studio / IntelliJ and stop Gradle daemons: gradlew --stop
-echo    - Close Chrome and Edge
+echo    - Close Chrome, Edge, Firefox, Discord and Steam
 echo  You will still get a preview and a y/N confirmation before anything is deleted.
 echo.
 pause
